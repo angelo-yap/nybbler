@@ -18,17 +18,30 @@ if(NOT LLVM_ENABLE_RTTI)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
 endif()
 
-include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_definitions(${LLVM_DEFINITIONS})
 
 # MODULE library -> libNybbler.so, loaded by opt via -load-pass-plugin.
 add_library(Nybbler MODULE lib/Nybbler.cpp)
 
+target_include_directories(Nybbler SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_include_directories(Nybbler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 # Plugins resolve LLVM symbols from the opt process at load time; do not link
 # them in, and allow the undefined references at link time. Keep default symbol
 # visibility so opt can find the exported `llvmGetPassPluginInfo` entry point.
-set_target_properties(Nybbler PROPERTIES PREFIX "lib")
+set_target_properties(Nybbler PROPERTIES 
+    PREFIX "lib"
+    ENABLE_EXPORTS ON
+)
+
+# Tell the macOS linker to allow undefined symbols to be resolved at runtime by opt
+if(APPLE)
+    target_link_options(Nybbler PRIVATE "-undefined" "dynamic_lookup")
+endif()
+
+# Map and link necessary LLVM component interfaces
+llvm_map_components_to_libnames(llvm_libs Core Support IRReader)
+target_link_libraries(Nybbler PRIVATE ${llvm_libs})
 
 # lit needs to know where the freshly built plugin lives.
 configure_file(
