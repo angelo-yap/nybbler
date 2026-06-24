@@ -84,14 +84,58 @@ static Value *lowerBitwise(CarrierOp &Op, ArrayRef<Value *> Ops) {
                           Ops[0], Ops[1]);
 }
 
+/// SWAR add for i4 and i2 fields packed into a byte-vector carrier.
+///
+/// See the file-level comment for the derivation. The two masks are chosen by
+/// field width:
+///   i4 (FieldBits == 4): hmask = 0x88, lmask = 0x77
+///   i2 (FieldBits == 2): hmask = 0xAA, lmask = 0x55
+///
+/// i1 add never reaches this handler; tryLower re-maps it to Xor first.
+static Value *lowerAdd(CarrierOp &Op, ArrayRef<Value *> Ops) {
+  IRBuilder<> &B = Op.B;
+  unsigned NumBytes = Op.CarrierTy->getNumElements();
+
+  // Choose the per-byte mask constants based on field width.
+  uint8_t HMaskByte = (Op.FieldBits == 4) ? 0x88u : 0xAAu; // top bit of each field
+  uint8_t LMaskByte = ~HMaskByte;                           // all bits except top
+
+  // Build splat constant vectors for the two masks.
+  SmallVector<Constant *, 16> HVals(NumBytes,
+      ConstantInt::get(B.getInt8Ty(), HMaskByte));
+  SmallVector<Constant *, 16> LVals(NumBytes,
+      ConstantInt::get(B.getInt8Ty(), LMaskByte));
+  Value *HMask = ConstantVector::get(HVals);
+  Value *LMask = ConstantVector::get(LVals);
+
+  // Mask off the top bit of every field in each operand.
+  Value *ALow = B.CreateAnd(Ops[0], LMask, "add.alo");
+  Value *BLow = B.CreateAnd(Ops[1], LMask, "add.blo");
+
+  // add; no carry can escape because the top bit was cleared.
+  Value *Sum = B.CreateAdd(ALow, BLow, "add.sum");
+
+  // Restore the top bits. The top bit of each field is a 1-bit add,
+  // i.e. XOR of the two input top bits.
+  Value *TopXor = B.CreateXor(Ops[0], Ops[1], "add.topxor");
+  Value *TopBits = B.CreateAnd(TopXor, HMask, "add.topbits");
+
+  return B.CreateXor(Sum, TopBits, "add.result");
+}
+
 /// Map an opcode to its handler, or nullptr if Nybbler does not lower it.
 /// Registering a new operation is a single case here plus its handler function.
+///
+/// Note: i1 `add` is re-mapped to Xor before dispatch (see tryLower) because
+/// 1-bit addition is exactly XOR; it falls through to lowerBitwise.
 static CarrierHandler getHandler(unsigned Opcode) {
   switch (Opcode) {
   case Instruction::And:
   case Instruction::Or:
   case Instruction::Xor:
     return lowerBitwise;
+  case Instruction::Add:
+    return lowerAdd;
   default:
     return nullptr;
   }
@@ -105,16 +149,24 @@ static bool tryLower(Instruction &I) {
   if (!BO)
     return false;
 
-  CarrierHandler Handler = getHandler(BO->getOpcode());
-  if (!Handler)
-    return false;
+  unsigned Opcode = BO->getOpcode();
 
   auto *FieldTy = dyn_cast<FixedVectorType>(BO->getType());
   if (!FieldTy || !isNarrowFieldVector(FieldTy))
     return false;
 
+  // i1 add is XOR (addition mod 2 == XOR); re-map before handler lookup so
+  // it falls through to the existing lowerBitwise path with no extra logic.
+  unsigned FieldBits = FieldTy->getScalarSizeInBits();
+  if (Opcode == Instruction::Add && FieldBits == 1)
+    Opcode = Instruction::Xor;
+
+  CarrierHandler Handler = getHandler(Opcode);
+  if (!Handler)
+    return false;
+
   // total = K * N. Skip when not a whole number of bytes (no padding in Slice 1).
-  unsigned Total = FieldTy->getNumElements() * FieldTy->getScalarSizeInBits();
+  unsigned Total = FieldTy->getNumElements() * FieldBits;
   if (Total % 8 != 0)
     return false;
 
@@ -126,8 +178,7 @@ static bool tryLower(Instruction &I) {
   Value *LHS = B.CreateBitCast(BO->getOperand(0), CarrierTy);
   Value *RHS = B.CreateBitCast(BO->getOperand(1), CarrierTy);
 
-  CarrierOp Op{B, FieldTy, CarrierTy, FieldTy->getScalarSizeInBits(),
-               BO->getOpcode()};
+  CarrierOp Op{B, FieldTy, CarrierTy, FieldBits, Opcode};
   Value *Carrier = Handler(Op, {LHS, RHS});
 
   Value *Result = B.CreateBitCast(Carrier, FieldTy);
@@ -140,7 +191,11 @@ PreservedAnalyses NybblerPass::run(Function &F, FunctionAnalysisManager &) {
   // Collect first to avoid invalidating the iterator while we rewrite/erase.
   SmallVector<Instruction *, 16> Worklist;
   for (Instruction &I : instructions(F))
-    if (getHandler(I.getOpcode()))
+    if (getHandler(I.getOpcode()) ||
+        // Also collect i1 add before the Xor remap happens.
+        (I.getOpcode() == Instruction::Add &&
+         isNarrowFieldVector(I.getType()) &&
+         cast<FixedVectorType>(I.getType())->getScalarSizeInBits() == 1))
       Worklist.push_back(&I);
 
   bool Changed = false;
