@@ -1,4 +1,4 @@
-# Nybbler
+# nybbler
 
 An out-of-tree LLVM transformation pass that lowers **narrow-field** (`i1`/`i2`/`i4`)
 vertical vector operations into legal-width **SWAR** (SIMD-within-a-register)
@@ -9,7 +9,7 @@ SIMD ISAs only expose field-parallel operations at hardware field widths
 (8/16/32/64 bits). Narrow fields — central to parallel bit-stream / Parabix-style
 processing — are expressible in LLVM IR (`<K x i4>`, `<K x i2>`, `<K x i1>`) but
 illegal on real targets, so the default legalizer scalarizes them and discards
-the parallelism. Nybbler rewrites them into byte-vector carrier ops instead.
+the parallelism. nybbler rewrites them into byte-vector carrier ops instead.
 
 ## Slice 1 (this revision): bitwise lowering
 
