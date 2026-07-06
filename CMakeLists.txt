@@ -37,11 +37,10 @@ set_target_properties(Nybbler PROPERTIES
 # Tell the macOS linker to allow undefined symbols to be resolved at runtime by opt
 if(APPLE)
     target_link_options(Nybbler PRIVATE "-undefined" "dynamic_lookup")
+  # Map and link necessary LLVM component interfaces
+  llvm_map_components_to_libnames(llvm_libs Core Support IRReader)
+  target_link_libraries(Nybbler PRIVATE ${llvm_libs})
 endif()
-
-# Map and link necessary LLVM component interfaces
-llvm_map_components_to_libnames(llvm_libs Core Support IRReader)
-target_link_libraries(Nybbler PRIVATE ${llvm_libs})
 
 # lit needs to know where the freshly built plugin lives.
 configure_file(

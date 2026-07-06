@@ -1,0 +1,5 @@
+# Regression guard wired into the suite: lit runs this like any other test, so
+# `lit test/` fails if any op lacks a shape or differential test (ticket: "CI
+# fails if any category is skipped or missing").
+# RUN: %python "%coverage_check" "%shape_dir" "%diff_dir" | %FileCheck "%s"
+# CHECK: COVERAGE OK

@@ -3,6 +3,7 @@
 
 config.opt_tool = "@LLVM_TOOLS_BINARY_DIR@/opt"
 config.filecheck_tool = "@LLVM_TOOLS_BINARY_DIR@/FileCheck"
+config.lli_tool = "@LLVM_TOOLS_BINARY_DIR@/lli"
 config.nybbler_plugin = "@CMAKE_BINARY_DIR@/libNybbler.so"
 
 lit_config.load_config(config, "@CMAKE_SOURCE_DIR@/test/lit.cfg.py")
