@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 16 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            llvm-16 llvm-16-dev llvm-16-tools llvm-16-runtime clang-16 cmake
+
+      - name: Install lit
+        run: |
+          pip install --user --break-system-packages lit
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        run: cmake -S . -B build -DLLVM_DIR=/usr/lib/llvm-16/cmake
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        run: lit -v build/test/
