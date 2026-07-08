@@ -77,6 +77,29 @@ struct CarrierOp {
 /// already bitcast to \c Op.CarrierTy; the return is the carrier-typed result.
 using CarrierHandler = Value *(*)(CarrierOp &Op, ArrayRef<Value *> Ops);
 
+/// Build a splatted byte-vector constant from a single per-field bit pattern.
+///
+/// A carrier byte packs 8/\p FieldBits fields of \p FieldBits bits each.
+/// \p FieldPattern gives the desired bits *within one field* (only its low
+/// \p FieldBits are used); the pattern is replicated across every field of a
+/// byte, and that byte is splatted across all lanes of \p CarrierTy. This is
+/// the one width-parameterized mask primitive shared by every field-aware
+/// handler (add's carry masks, the shift boundary masks, ...):
+///
+///   N=1: pattern 0b1    -> 0xFF        pattern 0b0    -> 0x00
+///   N=2: pattern 0b10   -> 0xAA        pattern 0b01   -> 0x55
+///   N=4: pattern 0b1000 -> 0x88        pattern 0b0111 -> 0x77
+static Constant *splatFieldPattern(IRBuilder<> &B, FixedVectorType *CarrierTy,
+                                   unsigned FieldBits, unsigned FieldPattern) {
+  unsigned FieldsPerByte = 8 / FieldBits;
+  uint8_t Field = FieldPattern & ((1u << FieldBits) - 1);
+  uint8_t Byte = 0;
+  for (unsigned I = 0; I < FieldsPerByte; ++I)
+    Byte |= Field << (I * FieldBits);
+  return ConstantVector::getSplat(CarrierTy->getElementCount(),
+                                  ConstantInt::get(B.getInt8Ty(), Byte));
+}
+
 /// and/or/xor: bit-independent, so the carrier body is the identical opcode on
 /// bytes. (`not` arrives as `xor %a, -1` and rides this same handler.)
 static Value *lowerBitwise(CarrierOp &Op, ArrayRef<Value *> Ops) {
@@ -94,19 +117,13 @@ static Value *lowerBitwise(CarrierOp &Op, ArrayRef<Value *> Ops) {
 /// i1 add never reaches this handler; tryLower re-maps it to Xor first.
 static Value *lowerAdd(CarrierOp &Op, ArrayRef<Value *> Ops) {
   IRBuilder<> &B = Op.B;
-  unsigned NumBytes = Op.CarrierTy->getNumElements();
+  unsigned N = Op.FieldBits;
 
-  // Choose the per-byte mask constants based on field width.
-  uint8_t HMaskByte = (Op.FieldBits == 4) ? 0x88u : 0xAAu; // top bit of each field
-  uint8_t LMaskByte = ~HMaskByte;                           // all bits except top
-
-  // Build splat constant vectors for the two masks.
-  SmallVector<Constant *, 16> HVals(NumBytes,
-      ConstantInt::get(B.getInt8Ty(), HMaskByte));
-  SmallVector<Constant *, 16> LVals(NumBytes,
-      ConstantInt::get(B.getInt8Ty(), LMaskByte));
-  Value *HMask = ConstantVector::get(HVals);
-  Value *LMask = ConstantVector::get(LVals);
+  // Per-field masks via the width-parameterized builder:
+  //   HMask = top bit of each field   (i4 -> 0x88, i2 -> 0xAA)
+  //   LMask = everything below it     (i4 -> 0x77, i2 -> 0x55)
+  Value *HMask = splatFieldPattern(B, Op.CarrierTy, N, 1u << (N - 1));
+  Value *LMask = splatFieldPattern(B, Op.CarrierTy, N, (1u << (N - 1)) - 1);
 
   // Mask off the top bit of every field in each operand.
   Value *ALow = B.CreateAnd(Ops[0], LMask, "add.alo");
@@ -123,6 +140,40 @@ static Value *lowerAdd(CarrierOp &Op, ArrayRef<Value *> Ops) {
   return B.CreateXor(Sum, TopBits, "add.result");
 }
 
+/// Byte-lane shift scaffolding for shl/lshr (U2-A skeleton).
+///
+/// tryLower has already bitcast both operands to the byte carrier, so the two
+/// structural steps live here: shift the carrier with the same opcode, then AND
+/// with a per-field *boundary mask* that confines each field's bits to its own
+/// lane. A whole-byte shift lets bits cross a field boundary into a neighbor
+/// (e.g. an i4 shl by 1 spills bit 3 into bit 4); the boundary mask clears the
+/// bits that crossed so each field behaves as an independent narrow shift.
+///
+/// The boundary mask below is a *placeholder*: the all-ones (identity) field
+/// mask, built via splatFieldPattern to prove the primitive is wired into this
+/// path. It confines nothing yet -- the correct mask depends on the shift
+/// amount s (shl must clear the low s bits of each field, lshr the high s bits)
+/// and, together with per-field/variable-amount handling, is what Track B
+/// (U2-B) derives and drops in here. Until then the numeric result is not yet
+/// correct (the shl/lshr differential tests stay XFAIL); the skeleton only has
+/// to compile and expose the shift-then-mask shape.
+static Value *lowerShift(CarrierOp &Op, ArrayRef<Value *> Ops) {
+  IRBuilder<> &B = Op.B;
+  unsigned N = Op.FieldBits;
+
+  Value *Shifted =
+      B.CreateBinOp(static_cast<Instruction::BinaryOps>(Op.Opcode), Ops[0],
+                    Ops[1], "shift.raw");
+
+  // TODO(Track B / U2-B): replace the identity mask with the amount-dependent
+  // boundary mask (shl -> clear low s bits per field; lshr -> clear high s
+  // bits per field).
+  Value *BoundaryMask =
+      splatFieldPattern(B, Op.CarrierTy, N, (1u << N) - 1);
+
+  return B.CreateAnd(Shifted, BoundaryMask, "shift.confined");
+}
+
 /// Map an opcode to its handler, or nullptr if Nybbler does not lower it.
 /// Registering a new operation is a single case here plus its handler function.
 ///
@@ -136,6 +187,9 @@ static CarrierHandler getHandler(unsigned Opcode) {
     return lowerBitwise;
   case Instruction::Add:
     return lowerAdd;
+  case Instruction::Shl:
+  case Instruction::LShr:
+    return lowerShift;
   default:
     return nullptr;
   }
