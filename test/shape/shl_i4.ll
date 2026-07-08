@@ -6,6 +6,10 @@ define <32 x i4> @shl_i4(<32 x i4> %a, <32 x i4> %b) {
 ; CHECK-LABEL: @shl_i4
 ; CHECK: bitcast <32 x i4> %a to <16 x i8>
 ; CHECK: bitcast <32 x i4> %b to <16 x i8>
+; CHECK: and <16 x i8>
+; CHECK: lshr <16 x i8>
+; CHECK: and <16 x i8>
+; CHECK: sub <16 x i8>
 ; CHECK: shl <16 x i8>
 ; CHECK: and <16 x i8>
 ; CHECK: bitcast <16 x i8> %{{.*}} to <32 x i4>

@@ -6,6 +6,10 @@ define <8 x i2> @shl_i2(<8 x i2> %a, <8 x i2> %b) {
 ; CHECK-LABEL: @shl_i2
 ; CHECK: bitcast <8 x i2> %a to <2 x i8>
 ; CHECK: bitcast <8 x i2> %b to <2 x i8>
+; CHECK: and <2 x i8>
+; CHECK: lshr <2 x i8>
+; CHECK: and <2 x i8>
+; CHECK: sub <2 x i8>
 ; CHECK: shl <2 x i8>
 ; CHECK: and <2 x i8>
 ; CHECK: bitcast <2 x i8> %{{.*}} to <8 x i2>

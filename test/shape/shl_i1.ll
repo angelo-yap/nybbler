@@ -5,10 +5,8 @@
 define <64 x i1> @shl_i1(<64 x i1> %a, <64 x i1> %b) {
 ; CHECK-LABEL: @shl_i1
 ; CHECK: bitcast <64 x i1> %a to <8 x i8>
-; CHECK: bitcast <64 x i1> %b to <8 x i8>
-; CHECK: shl <8 x i8>
-; CHECK: and <8 x i8>
 ; CHECK: bitcast <8 x i8> %{{.*}} to <64 x i1>
+; CHECK-NOT: shl
 ; CHECK-NOT: extractelement
   %r = shl <64 x i1> %a, %b
   ret <64 x i1> %r
