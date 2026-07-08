@@ -158,7 +158,14 @@ static Value *lowerSub(CarrierOp &Op, ArrayRef<Value *> Ops) {
 ///   - conditionally apply a carrier shift by s with a boundary mask
 ///   - blend shifted / unshifted per field
 ///
-/// i1 shl/lshr: only valid amount is 0 (identity); handler returns Ops[0].
+/// Shift-amount model: each field's amount is its full N-bit value. Amounts
+/// >= N shift every bit out, yielding 0 -- matching LLVM's scalar reference
+/// (the differential harness' ground truth), which over-shifts to 0 rather
+/// than masking the amount into range.
+///
+/// i1 is special-cased to identity: its only in-range amount is 0, and the
+/// scalar reference (lli interpreting `shl/lshr i1 x, 1`) returns x, so we
+/// match that rather than clearing the field.
 static Value *lowerShift(CarrierOp &Op, ArrayRef<Value *> Ops) {
   IRBuilder<> &B = Op.B;
   unsigned N = Op.FieldBits;
@@ -168,57 +175,61 @@ static Value *lowerShift(CarrierOp &Op, ArrayRef<Value *> Ops) {
   if (N == 1)
     return Ops[0];
 
-  // Mask amounts to [0, N-1]: log2(N) low bits per field.
-  unsigned AmtBits = (N == 2) ? 1 : 2;
-  Value *Amt = B.CreateAnd(Ops[1],
-      splatFieldPattern(B, CT, N, (1u << AmtBits) - 1), "shift.amt");
-
   Value *FieldMask = splatFieldPattern(B, CT, N, (1u << N) - 1u);
   Value *LowBit    = splatFieldPattern(B, CT, N, 1u);
   Value *Zero      = splatFieldPattern(B, CT, N, 0u);
+  Value *Amt = Ops[1]; // per-field amount = the field's full N-bit value
 
   Value *Cur = Ops[0];
-  for (unsigned S = 1; S < N; S <<= 1) {
-    // Bring the bit corresponding to step S to position 0 of each field.
-    // S=1 -> bit 0 already there; S=2 -> shift right by 1 within the field.
-    // We do a carrier-level lshr by log2(S), then re-isolate bit 0 per field
-    // to prevent any bleed from adjacent fields.
-    unsigned LogS = (S == 1) ? 0 : 1;
-    Value *AmtShr = LogS == 0
+  // Barrel shift over every amount bit J (step S = 2^J) for J in [0, N). A step
+  // with S >= N clears the field, so amounts >= N correctly produce 0.
+  for (unsigned S = 1, J = 0; S < (1u << N); S <<= 1, ++J) {
+    // Isolate amount bit J into each field's bit 0. A carrier-level lshr by J
+    // brings it down; ANDing LowBit drops any bleed from adjacent fields.
+    Value *AmtBit = (J == 0)
         ? Amt
-        : B.CreateAnd(
-              B.CreateLShr(Amt,
-                  ConstantVector::getSplat(CT->getElementCount(),
-                      ConstantInt::get(B.getInt8Ty(), LogS)),
-                  "shift.amtshr"),
-              FieldMask, "shift.amtshr_m");
-    // Isolate bit 0 of each field.
-    Value *HasStep = B.CreateAnd(AmtShr, LowBit, "shift.hasstep");
+        : B.CreateLShr(Amt,
+              ConstantVector::getSplat(CT->getElementCount(),
+                  ConstantInt::get(B.getInt8Ty(), J)),
+              "shift.amtshr");
+    Value *HasStep = B.CreateAnd(AmtBit, LowBit, "shift.hasstep");
 
-    // Expand 0/1 -> 0x00/all-ones per field via: (0 - bit) & fieldmask.
-    Value *StepSel = B.CreateAnd(
-        B.CreateSub(Zero, HasStep, "shift.sel_raw"),
-        FieldMask, "shift.sel");
+    // Expand each field's low bit 0/1 -> 0x0/all-ones. A carrier-wide subtract
+    // (0 - bit) would let borrows bleed across packed fields, so instead smear
+    // bit 0 up to the top of its field via in-field shifts: bit 0 shifted left
+    // by < N stays inside the field, so no cross-field bleed and no masking.
+    Value *StepSel = HasStep;
+    for (unsigned K = 1; K < N; K <<= 1)
+      StepSel = B.CreateOr(StepSel,
+          B.CreateShl(StepSel,
+              ConstantVector::getSplat(CT->getElementCount(),
+                  ConstantInt::get(B.getInt8Ty(), K))),
+          "shift.sel");
 
-    // Boundary mask: shl keeps top (N-S) bits; lshr keeps bottom (N-S) bits.
+    // Bits surviving an in-field shift by S: shl keeps the top (N-S), lshr
+    // keeps the bottom (N-S). S >= N keeps nothing -> the field is cleared.
     unsigned BPat = IsShl ? (((1u << N) - 1u) & ~((1u << S) - 1u))
-                           : ((1u << (N - S)) - 1u);
-    Value *BMask = splatFieldPattern(B, CT, N, BPat);
-    Constant *ShiftAmtC = ConstantVector::getSplat(
-        CT->getElementCount(), ConstantInt::get(B.getInt8Ty(), S));
-    Value *Shifted  = B.CreateBinOp(
-        static_cast<Instruction::BinaryOps>(Op.Opcode),
-        Cur, ShiftAmtC, "shift.raw");
-    Value *ShiftedM = B.CreateAnd(Shifted, BMask, "shift.confined");
+                          : (S < N ? ((1u << (N - S)) - 1u) : 0u);
+    Value *Taken;
+    if (BPat == 0) {
+      Taken = Zero; // shifting by S >= N clears the field
+    } else {
+      Value *BMask = splatFieldPattern(B, CT, N, BPat);
+      Value *Shifted = B.CreateBinOp(
+          static_cast<Instruction::BinaryOps>(Op.Opcode), Cur,
+          ConstantVector::getSplat(CT->getElementCount(),
+              ConstantInt::get(B.getInt8Ty(), S)),
+          "shift.raw");
+      Value *ShiftedM = B.CreateAnd(Shifted, BMask, "shift.confined");
+      Taken = B.CreateAnd(ShiftedM, StepSel, "shift.taken");
+    }
 
-    // Per-field blend: (ShiftedM & sel) | (Cur & ~sel).
+    // Per-field blend: (shifted & sel) | (unshifted & ~sel).
     Value *NotSel = B.CreateAnd(
         B.CreateXor(StepSel, FieldMask, "shift.notsel_raw"),
         FieldMask, "shift.notsel");
-    Cur = B.CreateOr(
-        B.CreateAnd(ShiftedM, StepSel, "shift.taken"),
-        B.CreateAnd(Cur,      NotSel,  "shift.kept"),
-        "shift.blend");
+    Cur = B.CreateOr(Taken, B.CreateAnd(Cur, NotSel, "shift.kept"),
+                     "shift.blend");
   }
   return Cur;
 }
