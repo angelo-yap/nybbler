@@ -189,9 +189,14 @@ static Value *lowerShift(CarrierOp &Op, ArrayRef<Value *> Ops) {
     unsigned BPat = IsShl ? (((1u << N) - 1u) & ~((1u << S) - 1u))
                            : ((1u << (N - S)) - 1u);
     Value *BMask   = splatFieldPattern(B, CT, N, BPat);
+    Constant *ShiftAmt = ConstantVector::getSplat(
+      CT->getElementCount(),
+      ConstantInt::get(B.getInt8Ty(), S)
+    );
     Value *Shifted = B.CreateBinOp(
-        static_cast<Instruction::BinaryOps>(Op.Opcode),
-        Cur, splatFieldPattern(B, CT, N, S), "shift.raw");
+      static_cast<Instruction::BinaryOps>(Op.Opcode), Cur, ShiftAmt,
+      "shift.raw"
+    );
     Value *ShiftedM = B.CreateAnd(Shifted, BMask, "shift.confined");
 
     // Per-field blend.
