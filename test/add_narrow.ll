@@ -16,11 +16,11 @@ define <32 x i4> @add_i4(<32 x i4> %a, <32 x i4> %b) {
 ; CHECK-LABEL: @add_i4
 ; CHECK: bitcast <32 x i4> %a to <16 x i8>
 ; CHECK: bitcast <32 x i4> %b to <16 x i8>
-; CHECK: and <16 x i8> {{.*}}, <i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119>
-; CHECK: and <16 x i8> {{.*}}, <i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119, i8 119>
+; CHECK: and <16 x i8> {{.*}}, splat (i8 119)
+; CHECK: and <16 x i8> {{.*}}, splat (i8 119)
 ; CHECK: add <16 x i8>
 ; CHECK: xor <16 x i8>
-; CHECK: and <16 x i8> {{.*}}, <i8 -120, i8 -120, i8 -120, i8 -120, i8 -120, i8 -120, i8 -120, i8 -120, i8 -120, i8 -120, i8 -120, i8 -120, i8 -120, i8 -120, i8 -120, i8 -120>
+; CHECK: and <16 x i8> {{.*}}, splat (i8 -120)
 ; CHECK: xor <16 x i8>
 ; CHECK: bitcast <16 x i8> %{{.*}} to <32 x i4>
 ; CHECK-NOT: extractelement
@@ -37,11 +37,11 @@ define <8 x i2> @add_i2(<8 x i2> %a, <8 x i2> %b) {
 ; CHECK-LABEL: @add_i2
 ; CHECK: bitcast <8 x i2> %a to <2 x i8>
 ; CHECK: bitcast <8 x i2> %b to <2 x i8>
-; CHECK: and <2 x i8> {{.*}}, <i8 85, i8 85>
-; CHECK: and <2 x i8> {{.*}}, <i8 85, i8 85>
+; CHECK: and <2 x i8> {{.*}}, splat (i8 85)
+; CHECK: and <2 x i8> {{.*}}, splat (i8 85)
 ; CHECK: add <2 x i8>
 ; CHECK: xor <2 x i8>
-; CHECK: and <2 x i8> {{.*}}, <i8 -86, i8 -86>
+; CHECK: and <2 x i8> {{.*}}, splat (i8 -86)
 ; CHECK: xor <2 x i8>
 ; CHECK: bitcast <2 x i8> %{{.*}} to <8 x i2>
 ; CHECK-NOT: extractelement
