@@ -1,7 +1,7 @@
 //===- Nybbler.cpp - Narrow-field vector lowering pass --------------------===//
 //
 // Lowers narrow-field (i1/i2/i4) vertical vector ops into byte-vector carrier
-// ops. Slice 1 implements the *bitwise* operations (and/or/xor).
+// ops. Covers: bitwise (and/or/xor), add, sub, shl, lshr.
 //
 // The carrier pattern (spec section 3) is the same for every operation:
 //   1. total = K * N.
@@ -12,8 +12,8 @@
 //
 // Only step 4 differs between operations. So that pattern lives once in the
 // dispatch engine (tryLower), and each operation is a single *handler* function
-// keyed by opcode in getHandler. Adding a future operation (add, sub, shifts,
-// ...) means writing one handler and registering its opcode -- nothing else.
+// keyed by opcode in getHandler. Adding a future operation means writing one
+// handler and registering its opcode -- nothing else.
 //
 // Bitwise is the proof of the path: and/or/xor act on each bit independently and
 // never move a bit across a field boundary, so reinterpreting the same packed
@@ -107,78 +107,100 @@ static Value *lowerBitwise(CarrierOp &Op, ArrayRef<Value *> Ops) {
                           Ops[0], Ops[1]);
 }
 
-/// SWAR add for i4 and i2 fields packed into a byte-vector carrier.
-///
-/// See the file-level comment for the derivation. The two masks are chosen by
-/// field width:
-///   i4 (FieldBits == 4): hmask = 0x88, lmask = 0x77
-///   i2 (FieldBits == 2): hmask = 0xAA, lmask = 0x55
-///
-/// i1 add never reaches this handler; tryLower re-maps it to Xor first.
+/// SWAR add for i4/i2. i1 add is remapped to Xor before dispatch.
 static Value *lowerAdd(CarrierOp &Op, ArrayRef<Value *> Ops) {
   IRBuilder<> &B = Op.B;
   unsigned N = Op.FieldBits;
 
-  // Per-field masks via the width-parameterized builder:
-  //   HMask = top bit of each field   (i4 -> 0x88, i2 -> 0xAA)
-  //   LMask = everything below it     (i4 -> 0x77, i2 -> 0x55)
   Value *HMask = splatFieldPattern(B, Op.CarrierTy, N, 1u << (N - 1));
   Value *LMask = splatFieldPattern(B, Op.CarrierTy, N, (1u << (N - 1)) - 1);
 
-  // Mask off the top bit of every field in each operand.
-  Value *ALow = B.CreateAnd(Ops[0], LMask, "add.alo");
-  Value *BLow = B.CreateAnd(Ops[1], LMask, "add.blo");
-
-  // add; no carry can escape because the top bit was cleared.
-  Value *Sum = B.CreateAdd(ALow, BLow, "add.sum");
-
-  // Restore the top bits. The top bit of each field is a 1-bit add,
-  // i.e. XOR of the two input top bits.
-  Value *TopXor = B.CreateXor(Ops[0], Ops[1], "add.topxor");
+  Value *ALow    = B.CreateAnd(Ops[0], LMask, "add.alo");
+  Value *BLow    = B.CreateAnd(Ops[1], LMask, "add.blo");
+  Value *Sum     = B.CreateAdd(ALow, BLow, "add.sum");
+  Value *TopXor  = B.CreateXor(Ops[0], Ops[1], "add.topxor");
   Value *TopBits = B.CreateAnd(TopXor, HMask, "add.topbits");
-
   return B.CreateXor(Sum, TopBits, "add.result");
 }
 
-/// Byte-lane shift scaffolding for shl/lshr (U2-A skeleton).
+/// SWAR sub for i4/i2. i1 sub is remapped to Xor before dispatch.
 ///
-/// tryLower has already bitcast both operands to the byte carrier, so the two
-/// structural steps live here: shift the carrier with the same opcode, then AND
-/// with a per-field *boundary mask* that confines each field's bits to its own
-/// lane. A whole-byte shift lets bits cross a field boundary into a neighbor
-/// (e.g. an i4 shl by 1 spills bit 3 into bit 4); the boundary mask clears the
-/// bits that crossed so each field behaves as an independent narrow shift.
+/// Dual of add: set the top bit of a as a borrow absorber so no borrow escapes
+/// the field boundary. Formula:
+///   result = ((a | hmask) - (b & lmask)) ^ hmask ^ ((a ^ b) & hmask)
 ///
-/// The boundary mask below is a *placeholder*: the all-ones (identity) field
-/// mask, built via splatFieldPattern to prove the primitive is wired into this
-/// path. It confines nothing yet -- the correct mask depends on the shift
-/// amount s (shl must clear the low s bits of each field, lshr the high s bits)
-/// and, together with per-field/variable-amount handling, is what Track B
-/// (U2-B) derives and drops in here. Until then the numeric result is not yet
-/// correct (the shl/lshr differential tests stay XFAIL); the skeleton only has
-/// to compile and expose the shift-then-mask shape.
-static Value *lowerShift(CarrierOp &Op, ArrayRef<Value *> Ops) {
+/// Worked trace -- i4, lo=6-4=2, hi=5-3=2; byte a=0x56, b=0x34, hmask=0x88:
+///   0xDE - 0x34 = 0xAA;  (a^b)&hmask = 0x00;  0xAA^0x88^0x00 = 0x22 ✓
+static Value *lowerSub(CarrierOp &Op, ArrayRef<Value *> Ops) {
   IRBuilder<> &B = Op.B;
   unsigned N = Op.FieldBits;
 
-  Value *Shifted =
-      B.CreateBinOp(static_cast<Instruction::BinaryOps>(Op.Opcode), Ops[0],
-                    Ops[1], "shift.raw");
-
-  // TODO(Track B / U2-B): replace the identity mask with the amount-dependent
-  // boundary mask (shl -> clear low s bits per field; lshr -> clear high s
-  // bits per field).
-  Value *BoundaryMask =
-      splatFieldPattern(B, Op.CarrierTy, N, (1u << N) - 1);
-
-  return B.CreateAnd(Shifted, BoundaryMask, "shift.confined");
+  Value *HMask   = splatFieldPattern(B, Op.CarrierTy, N, 1u << (N - 1));
+  Value *LMask   = splatFieldPattern(B, Op.CarrierTy, N, (1u << (N - 1)) - 1);
+  Value *AHigh   = B.CreateOr(Ops[0],  HMask, "sub.ahi");
+  Value *BLow    = B.CreateAnd(Ops[1], LMask, "sub.blo");
+  Value *Raw     = B.CreateSub(AHigh, BLow, "sub.raw");
+  Value *TopXor  = B.CreateXor(Ops[0], Ops[1], "sub.topxor");
+  Value *TopBits = B.CreateAnd(TopXor, HMask, "sub.topbits");
+  Value *Fix     = B.CreateXor(HMask, TopBits, "sub.fix");
+  return B.CreateXor(Raw, Fix, "sub.result");
 }
 
-/// Map an opcode to its handler, or nullptr if Nybbler does not lower it.
-/// Registering a new operation is a single case here plus its handler function.
+/// SWAR shl/lshr for i4/i2 via per-field bit-serial conditional shifts.
 ///
-/// Note: i1 `add` is re-mapped to Xor before dispatch (see tryLower) because
-/// 1-bit addition is exactly XOR; it falls through to lowerBitwise.
+/// Shift-amount model: per-field variable amounts, masked to [0, N-1] (&
+/// (N-1)) so out-of-range values (poison per LangRef) produce defined output
+/// that agrees with the scalar reference in the differential harness.
+///
+/// For each power-of-two step s = 1, 2, ..., N/2:
+///   - extract whether each field's amount has bit s set
+///   - conditionally apply a carrier shift by s with a boundary mask
+///   - blend shifted / unshifted per field
+///
+/// i1 shl/lshr: only valid amount is 0 (identity); handler returns Ops[0].
+static Value *lowerShift(CarrierOp &Op, ArrayRef<Value *> Ops) {
+  IRBuilder<> &B = Op.B;
+  unsigned N = Op.FieldBits;
+  FixedVectorType *CT = Op.CarrierTy;
+  bool IsShl = (Op.Opcode == Instruction::Shl);
+
+  if (N == 1)
+    return Ops[0];
+
+  // Mask amounts to [0, N-1]: log2(N) low bits per field.
+  unsigned AmtBits = (N == 2) ? 1 : 2;
+  Value *Amt = B.CreateAnd(Ops[1],
+      splatFieldPattern(B, CT, N, (1u << AmtBits) - 1), "shift.amt");
+
+  Value *Cur = Ops[0];
+  for (unsigned S = 1; S < N; S <<= 1) {
+    // Does this field's amount have bit S set?
+    Value *AmtShr  = B.CreateLShr(Amt, splatFieldPattern(B, CT, N, S), "shift.amtshr");
+    Value *HasStep = B.CreateAnd(AmtShr, splatFieldPattern(B, CT, N, 1u), "shift.hasstep");
+    // Expand to per-field all-ones / all-zeros select mask: 0 - bit.
+    Value *StepSel = B.CreateAnd(
+        B.CreateSub(splatFieldPattern(B, CT, N, 0u), HasStep, "shift.sel_raw"),
+        splatFieldPattern(B, CT, N, (1u << N) - 1u), "shift.sel");
+
+    // Boundary mask: shl keeps top (N-S) bits; lshr keeps bottom (N-S) bits.
+    unsigned BPat = IsShl ? (((1u << N) - 1u) & ~((1u << S) - 1u))
+                           : ((1u << (N - S)) - 1u);
+    Value *BMask   = splatFieldPattern(B, CT, N, BPat);
+    Value *Shifted = B.CreateBinOp(
+        static_cast<Instruction::BinaryOps>(Op.Opcode),
+        Cur, splatFieldPattern(B, CT, N, S), "shift.raw");
+    Value *ShiftedM = B.CreateAnd(Shifted, BMask, "shift.confined");
+
+    // Per-field blend.
+    Value *NotSel  = B.CreateAnd(
+        B.CreateXor(StepSel, splatFieldPattern(B, CT, N, (1u << N) - 1u)),
+        splatFieldPattern(B, CT, N, (1u << N) - 1u), "shift.notsel");
+    Cur = B.CreateOr(B.CreateAnd(ShiftedM, StepSel,  "shift.taken"),
+                     B.CreateAnd(Cur,       NotSel,   "shift.kept"), "shift.blend");
+  }
+  return Cur;
+}
+
 static CarrierHandler getHandler(unsigned Opcode) {
   switch (Opcode) {
   case Instruction::And:
@@ -187,6 +209,8 @@ static CarrierHandler getHandler(unsigned Opcode) {
     return lowerBitwise;
   case Instruction::Add:
     return lowerAdd;
+  case Instruction::Sub:
+    return lowerSub;
   case Instruction::Shl:
   case Instruction::LShr:
     return lowerShift;
@@ -197,7 +221,6 @@ static CarrierHandler getHandler(unsigned Opcode) {
 
 } // namespace
 
-/// Try to lower \p I through the carrier path. Returns true iff it was rewritten.
 static bool tryLower(Instruction &I) {
   auto *BO = dyn_cast<BinaryOperator>(&I);
   if (!BO)
@@ -209,17 +232,16 @@ static bool tryLower(Instruction &I) {
   if (!FieldTy || !isNarrowFieldVector(FieldTy))
     return false;
 
-  // i1 add is XOR (addition mod 2 == XOR); re-map before handler lookup so
-  // it falls through to the existing lowerBitwise path with no extra logic.
   unsigned FieldBits = FieldTy->getScalarSizeInBits();
-  if (Opcode == Instruction::Add && FieldBits == 1)
+
+  // i1 add and i1 sub are both XOR (arithmetic mod 2); remap before dispatch.
+  if ((Opcode == Instruction::Add || Opcode == Instruction::Sub) && FieldBits == 1)
     Opcode = Instruction::Xor;
 
   CarrierHandler Handler = getHandler(Opcode);
   if (!Handler)
     return false;
 
-  // total = K * N. Skip when not a whole number of bytes (no padding in Slice 1).
   unsigned Total = FieldTy->getNumElements() * FieldBits;
   if (Total % 8 != 0)
     return false;
@@ -242,12 +264,11 @@ static bool tryLower(Instruction &I) {
 }
 
 PreservedAnalyses NybblerPass::run(Function &F, FunctionAnalysisManager &) {
-  // Collect first to avoid invalidating the iterator while we rewrite/erase.
   SmallVector<Instruction *, 16> Worklist;
   for (Instruction &I : instructions(F))
     if (getHandler(I.getOpcode()) ||
-        // Also collect i1 add before the Xor remap happens.
-        (I.getOpcode() == Instruction::Add &&
+        // Collect i1 add/sub before the Xor remap happens.
+        ((I.getOpcode() == Instruction::Add || I.getOpcode() == Instruction::Sub) &&
          isNarrowFieldVector(I.getType()) &&
          cast<FixedVectorType>(I.getType())->getScalarSizeInBits() == 1))
       Worklist.push_back(&I);
