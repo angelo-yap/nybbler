@@ -148,9 +148,10 @@ static Value *lowerSub(CarrierOp &Op, ArrayRef<Value *> Ops) {
 
 /// SWAR shl/lshr for i4/i2 via per-field bit-serial conditional shifts.
 ///
-/// Shift-amount model: per-field variable amounts, masked to [0, N-1] (&
-/// (N-1)) so out-of-range values (poison per LangRef) produce defined output
-/// that agrees with the scalar reference in the differential harness.
+/// Shift-amount model: per-field variable amounts, masked to [0, N-1] via
+/// `& (N-1)`. This deliberately defines results for out-of-range amounts
+/// rather than propagating LLVM IR poison semantics, matching the differential
+/// harness' scalar reference behaviour.
 ///
 /// For each power-of-two step s = 1, 2, ..., N/2:
 ///   - extract whether each field's amount has bit s set
