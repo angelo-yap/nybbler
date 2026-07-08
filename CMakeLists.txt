@@ -1,9 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
 project(Nybbler LANGUAGES C CXX)
 
-# Slice 1: out-of-tree LLVM pass plugin. Pinned to the team's LLVM 16 install
+# Slice 1: out-of-tree LLVM pass plugin. Pinned to the team's LLVM 22 install
 # (see docs/superpowers/specs/2026-06-22-nybbler-design.md section 2).
-find_package(LLVM 16 REQUIRED CONFIG)
+# LLVM's package config only accepts an exact major.minor match, so requesting
+# a bare major ("22") fails against point releases like 22.1.x. Request any LLVM
+# and assert the major ourselves -- this pins to 22 across all 22.x releases.
+find_package(LLVM REQUIRED CONFIG)
+if(NOT LLVM_VERSION_MAJOR EQUAL 22)
+  message(FATAL_ERROR
+    "Nybbler requires LLVM 22, but found ${LLVM_PACKAGE_VERSION}")
+endif()
 
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 message(STATUS "LLVM version: ${LLVM_PACKAGE_VERSION}")

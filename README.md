@@ -31,8 +31,10 @@ padding, and the runtime differential test harness are deferred to later slices.
 
 ## Requirements
 
-- LLVM 16 (this project pins `/usr/lib/llvm-16`; tools `opt-16`, `clang-16`,
-  `FileCheck-16`). On WSL2 / Ubuntu 24.04 these come from the `llvm-16` packages.
+- LLVM 22 (this project pins `/usr/lib/llvm-22`; tools `opt-22`, `clang-22`,
+  `FileCheck-22`). On WSL2 / Ubuntu 24.04 these come from the `llvm-22` packages
+  via [apt.llvm.org](https://apt.llvm.org) (`wget https://apt.llvm.org/llvm.sh &&
+  chmod +x llvm.sh && sudo ./llvm.sh 22`).
 - CMake ≥ 3.20.
 - [`lit`](https://pypi.org/project/lit/) for the test suite:
   `pip install --user lit` (or run it from a virtualenv).
@@ -40,7 +42,7 @@ padding, and the runtime differential test harness are deferred to later slices.
 ## Build
 
 ```bash
-cmake -S . -B build -DLLVM_DIR=/usr/lib/llvm-16/cmake
+cmake -S . -B build -DLLVM_DIR=/usr/lib/llvm-22/cmake
 cmake --build build -j
 ```
 
@@ -49,13 +51,13 @@ This produces the plugin `build/libNybbler.so`.
 ## Run on a single file
 
 ```bash
-opt-16 -load-pass-plugin ./build/libNybbler.so -passes=nybbler in.ll -S
+opt-22 -load-pass-plugin ./build/libNybbler.so -passes=nybbler in.ll -S
 ```
 
 Example:
 
 ```bash
-opt-16 -load-pass-plugin ./build/libNybbler.so -passes=nybbler \
+opt-22 -load-pass-plugin ./build/libNybbler.so -passes=nybbler \
     test/bitwise_i4.ll -S
 ```
 
@@ -65,7 +67,7 @@ opt-16 -load-pass-plugin ./build/libNybbler.so -passes=nybbler \
 lit -v build/test/
 ```
 
-(Equivalently `llvm-lit-16 build/test/` where that wrapper is installed.) The
+(Equivalently `llvm-lit-22 build/test/` where that wrapper is installed.) The
 suite checks each width lowers to the `bitcast → byte-op → bitcast` form, asserts
 it did **not** scalarize (`CHECK-NOT: extractelement`), and that non-byte-multiple
 vectors are left unchanged.

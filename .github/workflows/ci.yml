@@ -12,11 +12,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LLVM 16 toolchain
+      - name: Install LLVM 22 toolchain
         run: |
-          sudo apt-get update
+          # LLVM 22 is not in the ubuntu-24.04 base repos; pull it from
+          # apt.llvm.org via the official installer script.
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 22
           sudo apt-get install -y \
-            llvm-16 llvm-16-dev llvm-16-tools llvm-16-runtime clang-16 cmake
+            llvm-22-dev llvm-22-tools llvm-22-runtime clang-22 cmake
 
       - name: Install lit
         run: |
@@ -24,7 +28,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Configure
-        run: cmake -S . -B build -DLLVM_DIR=/usr/lib/llvm-16/cmake
+        run: cmake -S . -B build -DLLVM_DIR=/usr/lib/llvm-22/cmake
 
       - name: Build
         run: cmake --build build -j
