@@ -5,10 +5,13 @@
 //
 // The carrier pattern (spec section 3) is the same for every operation:
 //   1. total = K * N.
-//   2. If total % 8 != 0, skip (leave to the default legalizer; no padding yet).
-//   3. bitcast each operand from <K x iN> to the carrier type <total/8 x i8>.
+//   2. If total % 8 != 0, widen each operand to the next byte boundary by
+//      appending zero lanes (K -> K' with K' * N % 8 == 0).
+//   3. bitcast each (padded) operand from <K' x iN> to the carrier type
+//      <K'*N/8 x i8>.
 //   4. emit the operation's body on the carrier operands.
-//   5. bitcast the result back to <K x iN>, replaceAllUsesWith, erase original.
+//   5. bitcast the result back to <K' x iN>, narrow to the original K lanes
+//      (dropping the pad lanes), replaceAllUsesWith, erase original.
 //
 // Only step 4 differs between operations. So that pattern lives once in the
 // dispatch engine (tryLower), and each operation is a single *handler* function
@@ -61,10 +64,11 @@ bool isNarrowFieldVector(Type *T) {
 namespace {
 
 /// Per-instruction context handed to a CarrierHandler. Carries the live builder
-/// (insertion point already at the original instruction), the original field
-/// vector type \c FieldTy (<K x iN>), the byte carrier type \c CarrierTy
-/// (<total/8 x i8>), the field width \c FieldBits (N), and the original opcode
-/// (so handlers shared across several opcodes, like bitwise, can branch on it).
+/// (insertion point already at the original instruction), the field vector type
+/// \c FieldTy (<K' x iN>, already padded to a byte multiple if the original
+/// lane count wasn't one), the byte carrier type \c CarrierTy (<K'*N/8 x i8>),
+/// the field width \c FieldBits (N), and the original opcode (so handlers
+/// shared across several opcodes, like bitwise, can branch on it).
 struct CarrierOp {
   IRBuilder<> &B;
   FixedVectorType *FieldTy;
@@ -275,22 +279,54 @@ static bool tryLower(Instruction &I) {
   if (!Handler)
     return false;
 
-  unsigned Total = FieldTy->getNumElements() * FieldBits;
-  if (Total % 8 != 0)
-    return false;
-
   LLVM_DEBUG(dbgs() << "nybbler: lowering " << *BO << "\n");
 
   IRBuilder<> B(BO);
-  auto *CarrierTy = FixedVectorType::get(B.getInt8Ty(), Total / 8);
 
-  Value *LHS = B.CreateBitCast(BO->getOperand(0), CarrierTy);
-  Value *RHS = B.CreateBitCast(BO->getOperand(1), CarrierTy);
+  // Pad non-byte-multiple vectors to the next byte boundary by appending zero
+  // lanes, run the handler on the padded carrier, and drop the pad lanes on
+  // the way back. Zero pad fields are inert for every handler: the field masks
+  // are per-byte splats so they already cover pad fields; add/sub confine
+  // carries/borrows within each field, and a zero field neither generates one
+  // nor lets one escape into the adjacent real field; shift steps operate on
+  // each field independently (the boundary masks confine every carrier shift),
+  // so a pad lane's value can never reach a real lane. Whatever junk the pad
+  // fields do compute is discarded by the narrowing shuffle.
+  unsigned K = FieldTy->getNumElements();
+  unsigned FieldsPerByte = 8 / FieldBits;
+  unsigned PaddedK = (K + FieldsPerByte - 1) / FieldsPerByte * FieldsPerByte;
 
-  CarrierOp Op{B, FieldTy, CarrierTy, FieldBits, Opcode};
-  Value *Carrier = Handler(Op, {LHS, RHS});
+  Value *LHS = BO->getOperand(0);
+  Value *RHS = BO->getOperand(1);
+  auto *PaddedTy = FieldTy;
+  if (PaddedK != K) {
+    PaddedTy = FixedVectorType::get(FieldTy->getElementType(), PaddedK);
+    // Widen by shuffling with a zero vector: lanes >= K select lane K, i.e.
+    // lane 0 of the zero operand.
+    SmallVector<int, 16> WidenMask;
+    for (unsigned J = 0; J < PaddedK; ++J)
+      WidenMask.push_back(J < K ? J : K);
+    Value *Zero = Constant::getNullValue(FieldTy);
+    LHS = B.CreateShuffleVector(LHS, Zero, WidenMask, "pad.widen.lhs");
+    RHS = B.CreateShuffleVector(RHS, Zero, WidenMask, "pad.widen.rhs");
+  }
 
-  Value *Result = B.CreateBitCast(Carrier, FieldTy);
+  auto *CarrierTy =
+      FixedVectorType::get(B.getInt8Ty(), PaddedK * FieldBits / 8);
+
+  Value *CarrierLHS = B.CreateBitCast(LHS, CarrierTy);
+  Value *CarrierRHS = B.CreateBitCast(RHS, CarrierTy);
+
+  CarrierOp Op{B, PaddedTy, CarrierTy, FieldBits, Opcode};
+  Value *Carrier = Handler(Op, {CarrierLHS, CarrierRHS});
+
+  Value *Result = B.CreateBitCast(Carrier, PaddedTy);
+  if (PaddedK != K) {
+    SmallVector<int, 16> NarrowMask;
+    for (unsigned J = 0; J < K; ++J)
+      NarrowMask.push_back(J);
+    Result = B.CreateShuffleVector(Result, NarrowMask, "pad.narrow");
+  }
   BO->replaceAllUsesWith(Result);
   BO->eraseFromParent();
   return true;
