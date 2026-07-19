@@ -15,6 +15,10 @@ The reference is therefore a genuine scalar reference with no per-operation code
 here: the harness is fully op-agnostic, so adding a new operation is just a new
 kernel file -- no harness changes (see the test-suite ticket "Done when").
 
+Non-byte-multiple kernels (K*N % 8 != 0, exercising the pass' zero-padding
+path) are supported: their operands are spelled as literal <K x iN> constants
+and their results printed per-field, since no legal byte bitcast exists.
+
 Reproducibility: the RNG seed defaults to 42 and can be overridden with the
 NYBBLER_DIFF_SEED environment variable (CI sets a random one); the seed actually
 used is printed so any CI failure can be reproduced exactly.
@@ -58,8 +62,21 @@ def trials(nbytes, rng):
                [rng.randrange(256) for _ in range(nbytes)])
 
 
+def fields(bytez, K, N):
+    """Slice the little-endian packed `bytez` into K N-bit field values."""
+    mask = (1 << N) - 1
+    return [(bytez[(i * N) // 8] >> ((i * N) % 8)) & mask for i in range(K)]
+
+
 def vec_const(bytez, K, N):
-    """A `<K x iN>` operand built by bitcasting an `<M x i8>` constant."""
+    """A `<K x iN>` operand built by bitcasting an `<M x i8>` constant.
+
+    Non-byte-multiple vectors (K*N % 8 != 0) have no legal byte bitcast, so
+    their fields are spelled directly as an `<K x iN>` literal instead; the
+    trailing bits of the last trial byte simply go unused."""
+    if (K * N) % 8 != 0:
+        elems = ", ".join("i%d %d" % (N, v) for v in fields(bytez, K, N))
+        return "<%s>" % elems
     elems = ", ".join("i8 %d" % i8(v) for v in bytez)
     M = len(bytez)
     return "bitcast (<%d x i8> <%s> to <%d x i%d>)" % (M, elems, K, N)
@@ -76,6 +93,7 @@ def build_module(src, kernels, batteries):
            "declare i32 @printf(i8*, ...)"]
     uid = 0
     for (K, N, name), battery in zip(kernels, batteries):
+        byte_multiple = (K * N) % 8 == 0
         M = K * N // 8
         for (a, b) in battery:
             fn = ["define void @trial{0}() {{".format(uid)]
@@ -83,15 +101,27 @@ def build_module(src, kernels, batteries):
                        "<{K} x i{N}> {bv})".format(
                            K=K, N=N, name=name,
                            av=vec_const(a, K, N), bv=vec_const(b, K, N)))
-            fn.append("  %rb = bitcast <{K} x i{N}> %r to <{M} x i8>"
-                       .format(K=K, N=N, M=M))
-            for j in range(M):
-                fn.append("  %e{0} = extractelement <{M} x i8> %rb, i32 {0}"
-                           .format(j, M=M))
-                fn.append("  %z{0} = zext i8 %e{0} to i32".format(j))
-                fn.append("  call i32 (i8*, ...) @printf(i8* getelementptr("
-                           "[5 x i8], [5 x i8]* @.hex, i32 0, i32 0), i32 %z{0})"
-                           .format(j))
+            if byte_multiple:
+                fn.append("  %rb = bitcast <{K} x i{N}> %r to <{M} x i8>"
+                           .format(K=K, N=N, M=M))
+                for j in range(M):
+                    fn.append("  %e{0} = extractelement <{M} x i8> %rb, i32 {0}"
+                               .format(j, M=M))
+                    fn.append("  %z{0} = zext i8 %e{0} to i32".format(j))
+                    fn.append("  call i32 (i8*, ...) @printf(i8* getelementptr("
+                               "[5 x i8], [5 x i8]* @.hex, i32 0, i32 0), i32 %z{0})"
+                               .format(j))
+            else:
+                # No legal byte bitcast: print each field instead. Both the
+                # reference and the candidate run this same module, so the
+                # formats always line up.
+                for j in range(K):
+                    fn.append("  %e{0} = extractelement <{K} x i{N}> %r, i32 {0}"
+                               .format(j, K=K, N=N))
+                    fn.append("  %z{0} = zext i{N} %e{0} to i32".format(j, N=N))
+                    fn.append("  call i32 (i8*, ...) @printf(i8* getelementptr("
+                               "[5 x i8], [5 x i8]* @.hex, i32 0, i32 0), i32 %z{0})"
+                               .format(j))
             fn.append("  call i32 (i8*, ...) @printf(i8* getelementptr("
                        "[2 x i8], [2 x i8]* @.nl, i32 0, i32 0))")
             fn.append("  ret void")
@@ -127,7 +157,9 @@ def main():
     seed = int(os.environ.get("NYBBLER_DIFF_SEED", "42"))
     print("seed=%d  kernels=%s" % (seed, ",".join(k[2] for k in kernels)))
     rng = random.Random(seed)
-    batteries = [list(trials(K * N // 8, rng)) for (K, N, _) in kernels]
+    # ceil-divide so non-byte-multiple kernels get enough trial bytes to fill
+    # every field (the last byte's leftover bits go unused).
+    batteries = [list(trials((K * N + 7) // 8, rng)) for (K, N, _) in kernels]
 
     with tempfile.TemporaryDirectory() as d:
         raw = os.path.join(d, "m.ll")
