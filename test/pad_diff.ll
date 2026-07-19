@@ -47,22 +47,29 @@ define <3 x i4> @sub_i4_pad(<3 x i4> %a, <3 x i4> %b) {
   ret <3 x i4> %r
 }
 
+; Shift amounts are masked into [0, N-1] in-kernel: out-of-range amounts are
+; poison, so the scalar reference's output for them is target/build dependent
+; (see diff/shl.ll).
 define <5 x i2> @shl_i2_pad(<5 x i2> %a, <5 x i2> %b) {
-  %r = shl <5 x i2> %a, %b
+  %amt = and <5 x i2> %b, splat (i2 1)
+  %r = shl <5 x i2> %a, %amt
   ret <5 x i2> %r
 }
 
 define <3 x i4> @shl_i4_pad(<3 x i4> %a, <3 x i4> %b) {
-  %r = shl <3 x i4> %a, %b
+  %amt = and <3 x i4> %b, splat (i4 3)
+  %r = shl <3 x i4> %a, %amt
   ret <3 x i4> %r
 }
 
 define <7 x i2> @lshr_i2_pad(<7 x i2> %a, <7 x i2> %b) {
-  %r = lshr <7 x i2> %a, %b
+  %amt = and <7 x i2> %b, splat (i2 1)
+  %r = lshr <7 x i2> %a, %amt
   ret <7 x i2> %r
 }
 
 define <3 x i4> @lshr_i4_pad(<3 x i4> %a, <3 x i4> %b) {
-  %r = lshr <3 x i4> %a, %b
+  %amt = and <3 x i4> %b, splat (i4 3)
+  %r = lshr <3 x i4> %a, %amt
   ret <3 x i4> %r
 }

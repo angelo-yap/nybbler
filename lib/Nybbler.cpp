@@ -152,24 +152,20 @@ static Value *lowerSub(CarrierOp &Op, ArrayRef<Value *> Ops) {
 
 /// SWAR shl/lshr for i4/i2 via per-field bit-serial conditional shifts.
 ///
-/// Shift-amount model: per-field variable amounts, masked to [0, N-1] via
-/// `& (N-1)`. This deliberately defines results for out-of-range amounts
-/// rather than propagating LLVM IR poison semantics, matching the differential
-/// harness' scalar reference behaviour.
-///
-/// For each power-of-two step s = 1, 2, ..., N/2:
-///   - extract whether each field's amount has bit s set
+/// For each power-of-two step s = 1, 2, ..., 2^(N-1):
+///   - extract whether each field's amount has that bit set
 ///   - conditionally apply a carrier shift by s with a boundary mask
 ///   - blend shifted / unshifted per field
 ///
-/// Shift-amount model: each field's amount is its full N-bit value. Amounts
-/// >= N shift every bit out, yielding 0 -- matching LLVM's scalar reference
-/// (the differential harness' ground truth), which over-shifts to 0 rather
-/// than masking the amount into range.
+/// Shift-amount model: each field's amount is its full N-bit value; amounts
+/// >= N shift every bit out, yielding 0. That out-of-range behaviour is our
+/// choice, not something the scalar reference pins down: `shl/lshr iN x, amt`
+/// with amt >= N is poison, and lli's observed result varies by target and
+/// LLVM build (0 on some, amt % N on others -- it has flipped across CI
+/// updates). The differential kernels therefore mask amounts into [0, N-1]
+/// in-kernel, and only in-range amounts are verified against the reference.
 ///
-/// i1 is special-cased to identity: its only in-range amount is 0, and the
-/// scalar reference (lli interpreting `shl/lshr i1 x, 1`) returns x, so we
-/// match that rather than clearing the field.
+/// i1 is special-cased to identity: its only in-range amount is 0.
 static Value *lowerShift(CarrierOp &Op, ArrayRef<Value *> Ops) {
   IRBuilder<> &B = Op.B;
   unsigned N = Op.FieldBits;
