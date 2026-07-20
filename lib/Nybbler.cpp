@@ -297,7 +297,8 @@ static Value *lowerAshr(CarrierOp &Op, ArrayRef<Value *> Ops) {
   Value *FieldMask = splatFieldPattern(B, CT, N, (1u << N) - 1u);
   Value *LowBit    = splatFieldPattern(B, CT, N, 1u);
   Value *HMask     = splatFieldPattern(B, CT, N, 1u << (N - 1));
-  Value *Amt = Ops[1];
+  Value *AmtMask = splatFieldPattern(B, CT, N, N - 1u);
+  Value *Amt = B.CreateAnd(Ops[1], AmtMask, "ashr.amtmasked");
 
   // Sign bit of each field, smeared across the whole field.
   Value *SignBit = B.CreateAnd(Ops[0], HMask, "ashr.sign");
@@ -377,9 +378,15 @@ static Value *lowerUlt(CarrierOp &Op, ArrayRef<Value *> Ops) {
   Value *AHigh = B.CreateOr(Ops[0], HMask, "ult.ahi");
   Value *BLow  = B.CreateAnd(Ops[1], LMask, "ult.blo");
   Value *Raw   = B.CreateSub(AHigh, BLow, "ult.raw");
-  Value *NotA  = B.CreateNot(Ops[0], "ult.nota");
-  Value *T     = B.CreateXor(B.CreateXor(Raw, Ops[1], "ult.xor1"), NotA, "ult.xor2");
-  Value *Top   = B.CreateAnd(T, HMask, "ult.top");
+
+  Value *NotRaw = B.CreateNot(Raw, "ult.notraw");
+  Value *NotA   = B.CreateNot(Ops[0], "ult.nota");
+  Value *Xor    = B.CreateXor(Ops[0], Ops[1], "ult.xor");
+  Value *NotXor = B.CreateNot(Xor, "ult.notxor");
+  Value *T1     = B.CreateAnd(NotA, Ops[1], "ult.t1");
+  Value *T2     = B.CreateAnd(NotXor, NotRaw, "ult.t2");
+  Value *T      = B.CreateOr(T1, T2, "ult.t");
+  Value *Top    = B.CreateAnd(T, HMask, "ult.top");
 
   // Smear the top bit down across the field (mirror of the bit0 smear-up
   // used in lowerShift/reduceAndBroadcastField).
