@@ -297,8 +297,7 @@ static Value *lowerAshr(CarrierOp &Op, ArrayRef<Value *> Ops) {
   Value *FieldMask = splatFieldPattern(B, CT, N, (1u << N) - 1u);
   Value *LowBit    = splatFieldPattern(B, CT, N, 1u);
   Value *HMask     = splatFieldPattern(B, CT, N, 1u << (N - 1));
-  Value *AmtMask = splatFieldPattern(B, CT, N, N - 1u);
-  Value *Amt = B.CreateAnd(Ops[1], AmtMask, "ashr.amtmasked");
+  Value *Amt = Ops[1];
 
   // Sign bit of each field, smeared across the whole field.
   Value *SignBit = B.CreateAnd(Ops[0], HMask, "ashr.sign");
