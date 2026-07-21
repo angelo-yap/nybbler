@@ -1,15 +1,11 @@
-; Shape test: narrow i1 icmp slt lowers onto a <8 x i8> carrier
-; (<64 x i1> = 64 bits) with no illegal-type fallback.
+; Shape test: narrow i1 icmp slt lowers via single-bit logic (no carrier
+; bitcast): -1 <s 0 is the only true case, so slt(a,b) = a & ~b.
 ; RUN: %opt -load-pass-plugin "%nybbler" -passes=nybbler "%s" -S | %FileCheck "%s"
-; XFAIL: *
-; Pending Slice 2 (arithmetic/shift/compare lowering, see README) -- pass
-; does not lower this op yet, so it falls through unchanged.
 
 define <64 x i1> @slt_i1(<64 x i1> %a, <64 x i1> %b) {
 ; CHECK-LABEL: @slt_i1
-; CHECK: bitcast <64 x i1> %a to <8 x i8>
-; CHECK: bitcast <64 x i1> %b to <8 x i8>
-; CHECK: icmp slt <8 x i8>
+; CHECK: %slt.i1.notb = xor <64 x i1> %b, splat (i1 true)
+; CHECK: %slt.i1.result = and <64 x i1> %a, %slt.i1.notb
 ; CHECK-NOT: extractelement
   %r = icmp slt <64 x i1> %a, %b
   ret <64 x i1> %r

@@ -4,8 +4,8 @@
 // (i1/i2/i4) into legal-width SWAR sequences so that any backend can lower
 // them directly to SIMD instead of scalarizing.
 //
-// Slice 1 covers the bitwise operations (and/or/xor) only. See
-// docs/superpowers/specs/2026-06-22-nybbler-design.md.
+// The pass covers bitwise, arithmetic, logical shift, and comparison lowering
+// for narrow-field vectors.
 //
 //===----------------------------------------------------------------------===//
 

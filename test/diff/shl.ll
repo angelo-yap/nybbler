@@ -1,10 +1,9 @@
 ; Differential test: per-field shl on the SWAR carrier must match
 ; LLVM's scalar reference for every input. Driven by tools/diff_runner.py.
 ;
-; Shift amounts are masked into [0, N-1] inside each kernel: `shl iN x, amt`
-; with amt >= N is poison, so the scalar reference's output for it is
-; target/LLVM-build dependent (it has flipped between 0 and amt%N across CI
-; runs). Only in-range amounts have defined semantics to differentiate.
+; The lowering masks each field's shift amount into [0, N-1] so the carrier
+; path matches the scalar reference for the in-range cases that the harness
+; differentiates.
 ; RUN: %python "%diff_runner" --opt "%opt" --lli "%lli" --plugin "%nybbler" "%s" | %FileCheck "%s"
 ; CHECK: ALL PASS
 

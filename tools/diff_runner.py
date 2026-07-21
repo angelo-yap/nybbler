@@ -23,6 +23,14 @@ Reproducibility: the RNG seed defaults to 42 and can be overridden with the
 NYBBLER_DIFF_SEED environment variable (CI sets a random one); the seed actually
 used is printed so any CI failure can be reproduced exactly.
 
+Shift amounts: for shl/lshr/ashr kernels, the `b` operand is a per-field shift
+amount rather than ordinary data. A shift count >= N is poison per the LLVM
+LangRef -- there is no defined reference value to diff against, and the
+unlowered scalar reference itself is free to (and does, depending on host/
+LLVM build) produce different results for the same poison input on different
+platforms. So `b` is clamped into [0, N-1] per field for these kernels before
+being emitted, keeping every trial inside defined behavior.
+
 Usage:
   diff_runner.py --opt OPT --lli LLI --plugin LIBNYBBLER.so KERNEL.ll
 Prints per-kernel results and a final "ALL PASS" line iff everything matched.
@@ -43,6 +51,11 @@ KERNEL_RE = re.compile(r"define\s+<(\d+)\s+x\s+i(\d+)>\s+@([A-Za-z0-9_.]+)\s*\("
 # signed-boundary (high bit) field patterns regardless of field width.
 STRUCTURED = [0x00, 0xFF, 0xAA, 0x55, 0x80, 0x7F]
 NUM_RANDOM = 100
+
+# Kernel-name prefixes whose `b` operand is a per-field shift amount rather
+# than ordinary data, and therefore needs clamping into [0, N-1] per field
+# to avoid poison (out-of-range shift) trials.
+SHIFT_KERNEL_PREFIXES = ("shl_", "lshr_", "ashr_")
 
 
 def i8(v):
@@ -66,6 +79,29 @@ def fields(bytez, K, N):
     """Slice the little-endian packed `bytez` into K N-bit field values."""
     mask = (1 << N) - 1
     return [(bytez[(i * N) // 8] >> ((i * N) % 8)) & mask for i in range(K)]
+
+
+def mask_shift_amounts(bytez, K, N):
+    """Clamp each N-bit field of a shift-amount operand into [0, N-1].
+
+    A shift count >= N is poison: there is no defined value to diff
+    against, and different LLVM builds/hosts are free to (and do)
+    legalize/interpret it differently, which shows up as environment-
+    dependent MISMATCHes that aren't real bugs. Masking each field down
+    to ceil(log2(N)) bits keeps every generated trial inside defined
+    behavior for shl/lshr/ashr.
+    """
+    amt_bits = (N - 1).bit_length()  # bits needed to represent 0..N-1
+    field_mask = (1 << amt_bits) - 1
+    vals = fields(bytez, K, N)
+    masked = [v & field_mask for v in vals]
+    # Repack into bytes, matching vec_const's little-endian per-field layout.
+    out = [0] * len(bytez)
+    for i, v in enumerate(masked):
+        byte_idx = (i * N) // 8
+        bit_off = (i * N) % 8
+        out[byte_idx] |= (v << bit_off) & 0xFF
+    return out
 
 
 def vec_const(bytez, K, N):
@@ -95,12 +131,14 @@ def build_module(src, kernels, batteries):
     for (K, N, name), battery in zip(kernels, batteries):
         byte_multiple = (K * N) % 8 == 0
         M = K * N // 8
+        is_shift = name.startswith(SHIFT_KERNEL_PREFIXES)
         for (a, b) in battery:
+            bv_bytes = mask_shift_amounts(b, K, N) if is_shift else b
             fn = ["define void @trial{0}() {{".format(uid)]
             fn.append("  %r = call <{K} x i{N}> @{name}(<{K} x i{N}> {av}, "
                        "<{K} x i{N}> {bv})".format(
                            K=K, N=N, name=name,
-                           av=vec_const(a, K, N), bv=vec_const(b, K, N)))
+                           av=vec_const(a, K, N), bv=vec_const(bv_bytes, K, N)))
             if byte_multiple:
                 fn.append("  %rb = bitcast <{K} x i{N}> %r to <{M} x i8>"
                            .format(K=K, N=N, M=M))
