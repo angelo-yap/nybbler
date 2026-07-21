@@ -29,7 +29,13 @@ LangRef -- there is no defined reference value to diff against, and the
 unlowered scalar reference itself is free to (and does, depending on host/
 LLVM build) produce different results for the same poison input on different
 platforms. So `b` is clamped into [0, N-1] per field for these kernels before
-being emitted, keeping every trial inside defined behavior.
+being emitted, keeping every trial inside defined behavior (the in-range case).
+
+The at/over-width case is covered separately by kernels whose name carries the
+`_ovf` marker: they self-mask the amount in-IR (`and %b, N-1`, the U2-B
+mask-to-N decision), so the *reference* is defined even for raw out-of-range
+inputs. Those kernels are fed the full unclamped amount range, so amounts >= N
+actually flow through and the agreed masking behavior is asserted end-to-end.
 
 Usage:
   diff_runner.py --opt OPT --lli LLI --plugin LIBNYBBLER.so KERNEL.ll
@@ -53,9 +59,27 @@ STRUCTURED = [0x00, 0xFF, 0xAA, 0x55, 0x80, 0x7F]
 NUM_RANDOM = 100
 
 # Kernel-name prefixes whose `b` operand is a per-field shift amount rather
-# than ordinary data, and therefore needs clamping into [0, N-1] per field
-# to avoid poison (out-of-range shift) trials.
+# than ordinary data. By default such a kernel's amount is clamped into
+# [0, N-1] per field so every trial is in-range: a count >= N is poison (see
+# the module docstring), which has no defined reference value to diff against.
 SHIFT_KERNEL_PREFIXES = ("shl_", "lshr_", "ashr_")
+
+# ...unless the kernel name carries this marker, in which case it self-masks
+# the amount in-IR (`and %b, N-1`, the U2-B mask-to-N decision) before the
+# shift. That makes the reference defined even for raw out-of-range inputs, so
+# the harness feeds such a kernel the *unclamped* full amount range -- this is
+# how the at/over-width shift edge case (shift_overwidth.ll) is exercised with
+# a genuine scalar ground truth rather than being clamped away.
+SHIFT_OVERWIDTH_MARKER = "_ovf"
+
+
+def clamps_shift_amount(name):
+    """True if the harness should clamp this kernel's `b` amount into [0, N-1].
+
+    Raw shift kernels (`shl_*`, `lshr_*`, `ashr_*`) are clamped; self-masking
+    over-width kernels (name contains `_ovf`) are fed the full range instead."""
+    return (name.startswith(SHIFT_KERNEL_PREFIXES)
+            and SHIFT_OVERWIDTH_MARKER not in name)
 
 
 def i8(v):
@@ -131,9 +155,9 @@ def build_module(src, kernels, batteries):
     for (K, N, name), battery in zip(kernels, batteries):
         byte_multiple = (K * N) % 8 == 0
         M = K * N // 8
-        is_shift = name.startswith(SHIFT_KERNEL_PREFIXES)
+        clamp_amt = clamps_shift_amount(name)
         for (a, b) in battery:
-            bv_bytes = mask_shift_amounts(b, K, N) if is_shift else b
+            bv_bytes = mask_shift_amounts(b, K, N) if clamp_amt else b
             fn = ["define void @trial{0}() {{".format(uid)]
             fn.append("  %r = call <{K} x i{N}> @{name}(<{K} x i{N}> {av}, "
                        "<{K} x i{N}> {bv})".format(

@@ -1,5 +1,8 @@
 ; Differential test: per-field ashr on the SWAR carrier must match
 ; LLVM's scalar reference for every input. Driven by tools/diff_runner.py.
+;
+; The harness clamps each field's shift amount into [0, N-1] here (the in-range
+; case); the at/over-width amount case is covered by test/shift_overwidth.ll.
 ; RUN: %python "%diff_runner" --opt "%opt" --lli "%lli" --plugin "%nybbler" "%s" | %FileCheck "%s"
 ; CHECK: ALL PASS
 
