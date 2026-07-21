@@ -275,14 +275,19 @@ static Value *lowerShift(CarrierOp &Op, ArrayRef<Value *> Ops) {
 }
 
 /// SWAR ashr for i4/i2, via the same per-field bit-serial conditional shift
-/// skeleton as lowerShift (same variable-per-field-amount model, same
-/// masked-to-[0,N-1] out-of-range handling -- decisions settled in U2-B,
-/// reused here rather than re-derived), but the bits vacated at the high end
-/// of each field are filled with that field's *sign* bit instead of zero.
+/// skeleton as lowerShift, but the bits vacated at the high end of each
+/// field are filled with that field's *sign* bit instead of zero.
 ///
 /// The sign bit is computed once up front and smeared across the whole field
 /// (mirror of lowerUlt's top-bit smear-down), then ORed into the vacated high
 /// S bits at each step after confining the shifted-in bits to the low (N-S).
+///
+/// Unlike lowerShift, the shift amount is used unmasked: the barrel-shift
+/// loop already walks every bit of the full field-width amount and sums the
+/// exact integer value of Amt, so it naturally saturates to full sign-fill
+/// once the cumulative shift reaches N -- masking Amt down to [0, N-1] would
+/// instead wrap out-of-range amounts back into range, which does not match
+/// the scalar reference's behavior for those inputs.
 ///
 /// i1 is special-cased to identity: its only in-range amount is 0 (matching
 /// the i1 shl/lshr special case).
