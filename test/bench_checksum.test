@@ -1,0 +1,21 @@
+# Benchmark correctness gate.
+#
+# Builds every bench/ kernel both ways (baseline llc, and nybbler + the same
+# llc) and asserts the two produce byte-identical output. This catches a
+# benchmark kernel drifting out of correctness -- a fast kernel computing the
+# wrong thing is not a result.
+#
+# Timing is deliberately *not* asserted here. CI runners are shared and noisy,
+# so a speedup threshold would flake; the numbers are produced by running
+# `bash bench/run.sh` on a quiet machine (see docs/benchmarks.md).
+#
+# The quoting on PLUGIN matters: the repo path may contain spaces.
+#
+# RUN: env OPT="%opt" LLC="%llc" CLANG="%clang" PLUGIN="%nybbler" \
+# RUN:     bash "%bench_dir/run.sh" --check-only | %FileCheck "%s"
+
+# CHECK: CHECKSUM MATCH arith_i4
+# CHECK: CHECKSUM MATCH cmp_i4
+# CHECK: CHECKSUM MATCH field_i2
+# CHECK: CHECKSUM MATCH mask_i1
+# CHECK-NOT: CHECKSUM MISMATCH

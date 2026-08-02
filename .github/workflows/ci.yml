@@ -16,6 +16,10 @@ jobs:
         run: |
           # LLVM 22 is not in the ubuntu-24.04 base repos; pull it from
           # apt.llvm.org via the official installer script.
+          # llvm-22-tools supplies llc and clang-22 the driver compiler, both
+          # needed by the benchmark checksum test (test/bench_checksum.test),
+          # which is the only part of the suite that compiles natively rather
+          # than running under lli.
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 22

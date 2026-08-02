@@ -11,30 +11,48 @@ processing — are expressible in LLVM IR (`<K x i4>`, `<K x i2>`, `<K x i1>`) b
 illegal on real targets, so the default legalizer scalarizes them and discards
 the parallelism. nybbler rewrites them into byte-vector carrier ops instead.
 
-## Slice 1 (this revision): bitwise lowering
+On the benchmark kernels this is worth **13x** on an `i4` arithmetic chain and
+**58x** on an `i2` one, measured against the same backend at the same
+optimization level — see [`docs/benchmarks.md`](docs/benchmarks.md).
 
-Lowers the **bitwise** ops `and`, `or`, `xor` (and `not`, which LLVM represents as
-`xor` with all-ones). For `%r = <op> <K x iN> %a, %b` with `N ∈ {1, 2, 4}`:
+## What it lowers
 
-1. `total = K * N`.
-2. If `total % 8 != 0`, **skip** (left to the default legalizer; no padding yet).
-3. `bitcast` each operand from `<K x iN>` to the carrier `<total/8 x i8>`.
-4. Re-emit the same opcode on the carrier operands.
-5. `bitcast` the result back to `<K x iN>` and replace all uses.
+| Category | Operations | Widths |
+|---|---|---|
+| Bitwise | `and`, `or`, `xor` (and `not`, which LLVM spells as `xor -1`) | i1, i2, i4 |
+| Arithmetic | `add`, `sub` | i1, i2, i4 |
+| Shifts | `shl`, `lshr`, `ashr` | i1, i2, i4 |
+| Comparisons | `icmp eq`, `ne`, `ult`, `slt` | i1, i2, i4 |
 
-Bitwise ops act on each bit independently and never move a bit across a field
-boundary, so reinterpreting the same packed bits as a byte vector yields
-bit-identical per-field results. No masking required — correct by construction.
+Every operation goes through one shared **carrier dispatch**: pad to a byte
+multiple with zero lanes if needed, bitcast the operands to a `<M x i8>`
+carrier, run a per-operation handler, then bitcast and narrow back. Only the
+handler differs between operations, so adding one means writing a single
+function.
 
-Arithmetic/shift/compare lowering (with carry/borrow containment), non-byte-multiple
-padding, and the runtime differential test harness are deferred to later slices.
+Vectors whose bit width is not a multiple of 8 are **padded**, not skipped.
+
+Anything without a handler — `mul`, `udiv`, the remaining `icmp` predicates —
+is left untouched for the default legalizer. The full boundary is in
+[Limitations](docs/benchmarks.md#limitations).
+
+## Documentation
+
+- [`docs/lowering.md`](docs/lowering.md) — the per-operation lowerings: carrier
+  dispatch, the SWAR add/sub carry and borrow containment, per-field shift
+  masking, `ashr` sign handling, the compare lowerings.
+- [`docs/correctness.md`](docs/correctness.md) — why the bitwise case is
+  correct by construction, how the masked paths keep carries and shifted-in
+  bits inside their field, and how the correctness matrix verifies it.
+- [`docs/benchmarks.md`](docs/benchmarks.md) — benchmark methodology, measured
+  results, and limitations.
 
 ## Requirements
 
-- LLVM 22 (this project pins `/usr/lib/llvm-22`; tools `opt-22`, `clang-22`,
-  `FileCheck-22`). On WSL2 / Ubuntu 24.04 these come from the `llvm-22` packages
-  via [apt.llvm.org](https://apt.llvm.org) (`wget https://apt.llvm.org/llvm.sh &&
-  chmod +x llvm.sh && sudo ./llvm.sh 22`).
+- LLVM 22 (this project pins `/usr/lib/llvm-22`; tools `opt-22`, `llc-22`,
+  `clang-22`, `lli-22`, `FileCheck-22`). On WSL2 / Ubuntu 24.04 these come from
+  the `llvm-22` packages via [apt.llvm.org](https://apt.llvm.org)
+  (`wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && sudo ./llvm.sh 22`).
 - CMake ≥ 3.20.
 - [`lit`](https://pypi.org/project/lit/) for the test suite:
   `pip install --user lit` (or run it from a virtualenv).
@@ -58,7 +76,7 @@ Example:
 
 ```bash
 opt-22 -load-pass-plugin ./build/libNybbler.so -passes=nybbler \
-    test/bitwise_i4.ll -S
+    test/shape/add_i4.ll -S
 ```
 
 ## Test
@@ -68,6 +86,28 @@ lit -v build/test/
 ```
 
 (Equivalently `llvm-lit-22 build/test/` where that wrapper is installed.) The
-suite checks each width lowers to the `bitcast → byte-op → bitcast` form, asserts
-it did **not** scalarize (`CHECK-NOT: extractelement`), and that non-byte-multiple
-vectors are left unchanged.
+suite has four layers:
+
+- `test/shape/` — 36 FileCheck tests asserting the exact carrier sequence per
+  operation per width, plus `CHECK-NOT: extractelement` to prove it did not
+  scalarize.
+- `test/diff/`, `test/pad_diff.ll`, `test/shift_overwidth.ll` — differential
+  tests running each kernel both unlowered (scalarized, the ground-truth
+  reference) and lowered under `lli`, requiring bit-identical output over
+  structured and seeded-random inputs. Reproduce a failure exactly with
+  `NYBBLER_DIFF_SEED=<n>`.
+- `test/edge_values.ll` — golden hex bytes for boundary inputs.
+- `test/coverage.test` — fails if the operation × width matrix has a hole.
+
+## Benchmark
+
+```bash
+bash bench/run.sh
+```
+
+Builds every kernel in `bench/kernels/` twice — once through `llc` alone
+(scalarized baseline) and once through `opt -passes=nybbler` followed by the
+identical `llc` line — verifies the two produce byte-identical output, then
+prints a timing table. `bash bench/run.sh --check-only` runs just the
+correctness gate; that is what CI does, since shared runners are too noisy to
+assert a speedup threshold.
