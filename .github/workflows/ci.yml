@@ -35,3 +35,9 @@ jobs:
 
       - name: Test
         run: lit -v build/test/
+
+      # Proves the documented end-to-end path still works on a machine that has
+      # only ever checked the repo out, which is the one thing the lit suite
+      # cannot check for itself.
+      - name: End-to-end demo
+        run: ./demo/run.sh

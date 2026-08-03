@@ -17,3 +17,7 @@ superpowers/
 .idea/
 *.swp
 .DS_Store
+
+# Python bytecode from the test harnesses in tools/
+__pycache__/
+*.pyc

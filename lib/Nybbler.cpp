@@ -494,17 +494,48 @@ static bool lowerNarrowOp(Instruction &I, unsigned Opcode,
   auto *CarrierTy =
       FixedVectorType::get(B.getInt8Ty(), PaddedK * FieldBits / 8);
 
-  Value *CarrierLHS = B.CreateBitCast(LHS, CarrierTy);
-  Value *CarrierRHS = B.CreateBitCast(RHS, CarrierTy);
+  Value *CarrierLHS = B.CreateBitCast(LHS, CarrierTy, "carrier.lhs");
+  Value *CarrierRHS = B.CreateBitCast(RHS, CarrierTy, "carrier.rhs");
 
   CarrierOp Op{B, PaddedTy, CarrierTy, FieldBits, Opcode, Pred};
   Value *Carrier = Handler(Op, {CarrierLHS, CarrierRHS});
 
-  Value *Result = B.CreateBitCast(Carrier, PaddedTy);
+  Value *Result = B.CreateBitCast(Carrier, PaddedTy, "carrier.result");
 
   if (IsCompare) {
     // Every field is all-ones or all-zeros; truncating each iN lane to i1
     // yields the correct boolean without any extra masking.
+    //
+    // That trunc is also the one place the lowering can leak back out to an
+    // illegal shape. <K x i1> has no packed register form -- the backend
+    // legalizes it to one boolean per byte lane -- so materializing it costs a
+    // bit-by-bit repack that undoes everything the carrier bought. When a
+    // compare only ever feeds `sext` back to the operand width (the field-mask
+    // idiom: compare, then use the result as a mask), the all-ones/all-zeros
+    // mask the handler already computed *is* that sext's result, because
+    // sext(trunc(m)) == m for a uniform field. So hand the mask straight to
+    // those users and never build the <K x i1> at all.
+    //
+    // Padded shapes are excluded: their mask still owes the narrowing shuffle
+    // below, so the equivalence does not hold on the value in hand here.
+    SmallVector<SExtInst *, 4> MaskUsers;
+    if (PaddedK == K)
+      for (User *U : I.users())
+        if (auto *SE = dyn_cast<SExtInst>(U))
+          if (SE->getDestTy() == FieldTy)
+            MaskUsers.push_back(SE);
+
+    for (SExtInst *SE : MaskUsers) {
+      SE->replaceAllUsesWith(Result);
+      SE->eraseFromParent();
+    }
+
+    // All users were mask consumers -- the compare itself is now dead.
+    if (I.use_empty()) {
+      I.eraseFromParent();
+      return true;
+    }
+
     auto *BoolTy = FixedVectorType::get(B.getInt1Ty(), PaddedK);
     Result = B.CreateTrunc(Result, BoolTy, "cmp.trunc");
   }

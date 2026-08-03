@@ -6,6 +6,7 @@
 # directly against the source tree without CMake, sensible defaults are used.
 
 import os
+import subprocess
 import sys
 
 import lit.formats
@@ -19,6 +20,7 @@ config.test_source_root = os.path.dirname(__file__)
 opt = getattr(config, "opt_tool", "opt-22")
 filecheck = getattr(config, "filecheck_tool", "FileCheck-22")
 lli = getattr(config, "lli_tool", "lli-22")
+llc = getattr(config, "llc_tool", "llc-22")
 
 # Path to libNybbler.so. Set by lit.site.cfg.py after a CMake build; fall back
 # to a build/ dir next to the source tree for convenience.
@@ -32,12 +34,23 @@ tools_dir = os.path.join(os.path.dirname(config.test_source_root), "tools")
 shape_dir = os.path.join(config.test_source_root, "shape")
 diff_dir = os.path.join(config.test_source_root, "diff")
 
+# The codegen guard cross-compiles to x86-64; an LLVM built without that target
+# registered can't run it, so gate the test rather than fail spuriously.
+try:
+    if "x86-64" in subprocess.run([llc, "--version"], capture_output=True,
+                                  text=True).stdout:
+        config.available_features.add("x86-registered-target")
+except OSError:
+    pass
+
 config.substitutions.append(("%opt", opt))
 config.substitutions.append(("%FileCheck", filecheck))
+config.substitutions.append(("%llc", llc))
 config.substitutions.append(("%lli", lli))
 config.substitutions.append(("%nybbler", plugin))
 config.substitutions.append(("%python", sys.executable))
 config.substitutions.append(("%diff_runner", os.path.join(tools_dir, "diff_runner.py")))
 config.substitutions.append(("%coverage_check", os.path.join(tools_dir, "coverage_check.py")))
+config.substitutions.append(("%codegen_check", os.path.join(tools_dir, "codegen_check.py")))
 config.substitutions.append(("%shape_dir", shape_dir))
 config.substitutions.append(("%diff_dir", diff_dir))
