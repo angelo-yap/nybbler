@@ -1,0 +1,12 @@
+# Backend guard wired into the suite: the shape tests prove the pass emits a
+# carrier sequence, but only the backend decides whether that sequence becomes
+# SIMD. This takes every operation at every width through
+# `opt -passes=nybbler | llc -mtriple=x86_64 -mattr=+avx2` and fails if any
+# kernel scalarizes, emits no vector code, or rebuilds a mask at runtime.
+#
+# See tools/codegen_check.py for why the kernels load from memory rather than
+# taking <K x iN> arguments (the ABI unpacks narrow vectors at the boundary).
+#
+# REQUIRES: x86-registered-target
+# RUN: %python "%codegen_check" --opt "%opt" --llc "%llc" --plugin "%nybbler" | %FileCheck "%s"
+# CHECK: CODEGEN OK

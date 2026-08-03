@@ -6,6 +6,7 @@
 # directly against the source tree without CMake, sensible defaults are used.
 
 import os
+import subprocess
 import sys
 
 import lit.formats
@@ -37,8 +38,18 @@ shape_dir = os.path.join(config.test_source_root, "shape")
 diff_dir = os.path.join(config.test_source_root, "diff")
 bench_dir = os.path.join(os.path.dirname(config.test_source_root), "bench")
 
+# The codegen guard cross-compiles to x86-64; an LLVM built without that target
+# registered can't run it, so gate the test rather than fail spuriously.
+try:
+    if "x86-64" in subprocess.run([llc, "--version"], capture_output=True,
+                                  text=True).stdout:
+        config.available_features.add("x86-registered-target")
+except OSError:
+    pass
+
 config.substitutions.append(("%opt", opt))
 config.substitutions.append(("%FileCheck", filecheck))
+config.substitutions.append(("%llc", llc))
 config.substitutions.append(("%lli", lli))
 config.substitutions.append(("%llc", llc))
 config.substitutions.append(("%clang", clang))
@@ -46,6 +57,7 @@ config.substitutions.append(("%nybbler", plugin))
 config.substitutions.append(("%python", sys.executable))
 config.substitutions.append(("%diff_runner", os.path.join(tools_dir, "diff_runner.py")))
 config.substitutions.append(("%coverage_check", os.path.join(tools_dir, "coverage_check.py")))
+config.substitutions.append(("%codegen_check", os.path.join(tools_dir, "codegen_check.py")))
 config.substitutions.append(("%shape_dir", shape_dir))
 config.substitutions.append(("%diff_dir", diff_dir))
 config.substitutions.append(("%bench_dir", bench_dir))
