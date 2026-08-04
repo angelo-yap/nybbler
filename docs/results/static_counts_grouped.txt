@@ -1,0 +1,23 @@
+CLASS         WIDTH   NYBBLER   BASELINE     RATIO
+-----------------------------------------------------
+bitwise       i1           15         15      1.0x
+bitwise       i2           15         15      1.0x
+bitwise       i4           15         15      1.0x
+arithmetic    i1           10         10      1.0x
+arithmetic    i2           25       1512     60.5x
+arithmetic    i4           25        752     30.1x
+shift         i1           12         12      1.0x
+shift         i2           50       2320     46.4x
+shift         i4          121       1183      9.8x
+compare       i1           22        551     25.1x
+compare       i2           55       3005     54.6x
+compare       i4           73       1524     20.9x
+-----------------------------------------------------
+
+NOTE: compare/i1 blends eq (7 vs 536, 76.6x -- the one genuine
+i1 win) with ne/ult/slt (5 vs 5, 1.0x each, degenerate). Report
+per-op alongside this aggregate for that row.
+
+Source: tools/codegen_check.py --report (test/shape/, 36 kernels,
+3 widths x 12 ops). Grouped by summing instruction counts within
+each class/width cell, then taking baseline/nybbler on the sums.
