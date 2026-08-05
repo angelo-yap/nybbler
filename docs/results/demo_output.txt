@@ -1,0 +1,34 @@
+== 1. the source ==========================================================
+Ordinary IR, except the vectors have 4-bit fields no target can execute:
+      %sum = add <32 x i4> %na, %nb
+      %lt = icmp ult <32 x i4> %na, %nb
+      %m = sext <32 x i1> %lt to <32 x i4>
+
+== 2. what nybbler emits ==================================================
+The <32 x i4> add becomes a byte-carrier SWAR sequence:
+      %na = bitcast <16 x i8> %va to <32 x i4>
+      %nb = bitcast <16 x i8> %vb to <32 x i4>
+      %carrier.lhs = bitcast <32 x i4> %na to <16 x i8>
+      %carrier.rhs = bitcast <32 x i4> %nb to <16 x i8>
+      %add.alo = and <16 x i8> %carrier.lhs, splat (i8 119)
+      %add.blo = and <16 x i8> %carrier.rhs, splat (i8 119)
+      %add.sum = add <16 x i8> %add.alo, %add.blo
+      %add.topxor = xor <16 x i8> %carrier.lhs, %carrier.rhs
+
+== 3. x86-64 AVX2 codegen, before and after ===============================
+    kernel               baseline    nybbler    ratio
+    nibble_add                381         18    21.2x
+    nibble_lt_mask            384         26    14.8x
+
+    baseline scalarizes -- per-nibble extract/insert:
+        60 vpextrb
+       120 vpinsrb
+    nybbler does not:
+      0 insert/extract instructions
+    and the loop-invariant field masks are hoisted out of the loop body,
+    not rebuilt per iteration:
+      	vpbroadcastb	.LCPI0_2(%rip), %xmm0   # xmm0 = [119,119,119,119,119,119,119,119,119,119,119,119,119,119,119,119]
+      	vpbroadcastb	.LCPI0_3(%rip), %xmm1   # xmm1 = [136,136,136,136,136,136,136,136,136,136,136,136,136,136,136,136]
+
+== 4. build and run for the host ==========================================
+    DEMO OK: 128 nibbles per kernel match the scalar reference
